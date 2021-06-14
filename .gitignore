@@ -11,6 +11,8 @@
 *.rej
 *.exe
 .*.swp
+*.vscode
+*.idea
 core
 *.cgo*.go
 *.cgo*.c

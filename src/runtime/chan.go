@@ -30,16 +30,16 @@ const (
 )
 
 type hchan struct {
-	qcount   uint           // total data in the queue
-	dataqsiz uint           // size of the circular queue
-	buf      unsafe.Pointer // points to an array of dataqsiz elements
-	elemsize uint16
-	closed   uint32
-	elemtype *_type // element type
-	sendx    uint   // send index
-	recvx    uint   // receive index
-	recvq    waitq  // list of recv waiters
-	sendq    waitq  // list of send waiters
+	qcount   uint           // total data in the queue	// 已有的元素数量
+	dataqsiz uint           // size of the circular queue	// 环形队列的大小，即 buf 的容量
+	buf      unsafe.Pointer // points to an array of dataqsiz elements	// 指向大小为 dataqsiz 的数组地址
+	elemsize uint16         // 元素大小
+	closed   uint32         // 是否关闭
+	elemtype *_type         // element type	// 元素类型
+	sendx    uint           // send index		// 下一个写索引
+	recvx    uint           // receive index	// 下一个读索引
+	recvq    waitq          // list of recv waiters	// recv 等待队列，即 ( <-chan )
+	sendq    waitq          // list of send waiters	// send 等待队列，即 ( chan<- )
 
 	// lock protects all fields in hchan, as well as several
 	// fields in sudogs blocked on this channel.
@@ -50,6 +50,7 @@ type hchan struct {
 	lock mutex
 }
 
+// recv等待队列 | send等待队列，其实是runtime.sudog类型的双向链表，sudog中存储的是中具体的等待中的协程
 type waitq struct {
 	first *sudog
 	last  *sudog
@@ -72,14 +73,18 @@ func makechan(t *chantype, size int) *hchan {
 	elem := t.elem
 
 	// compiler checks this but be safe.
+	// 检测 elem 的大小，编译时检测，需要小于 64kb
 	if elem.size >= 1<<16 {
 		throw("makechan: invalid channel element type")
 	}
-	if hchanSize%maxAlign != 0 || elem.align > maxAlign {
+	// 对齐限制 hchanSize 是 hchan 的大小再根据 maxAlign 调整后的值
+	if hchanSize%maxAlign != 0 || elem.align > maxAlign { // 64位系统 maxAlign=8, 32位系统 MaxAlign=4
 		throw("makechan: bad alignment")
 	}
 
+	// 计算要分配的堆内存的大小，是否超过了系统最大内存，并返回是否溢出
 	mem, overflow := math.MulUintptr(elem.size, uintptr(size))
+	// 检查 buf 会不会导致内存溢出 || 需要分配的内存是否超过最大可申请内存 || 判断缓冲通道的容量是否为负
 	if overflow || mem > maxAlloc-hchanSize || size < 0 {
 		panic(plainError("makechan: size out of range"))
 	}
@@ -88,27 +93,31 @@ func makechan(t *chantype, size int) *hchan {
 	// buf points into the same allocation, elemtype is persistent.
 	// SudoG's are referenced from their owning thread so they can't be collected.
 	// TODO(dvyukov,rlh): Rethink when collector can move allocated objects.
+	// 分配内存
 	var c *hchan
 	switch {
 	case mem == 0:
 		// Queue or element size is zero.
+		// 无缓冲区，只申请 hchan 结构的内存分配
 		c = (*hchan)(mallocgc(hchanSize, nil, true))
 		// Race detector uses this location for synchronization.
 		c.buf = c.raceaddr()
 	case elem.kind&kindNoPointers != 0:
 		// Elements do not contain pointers.
 		// Allocate hchan and buf in one call.
+		// 元素不包含指针，hchan 与 buf 一起申请内存分配，地址是连续的
 		c = (*hchan)(mallocgc(hchanSize+mem, nil, true))
 		c.buf = add(unsafe.Pointer(c), hchanSize)
 	default:
 		// Elements contain pointers.
+		// 元素包含指针，hchan 与 buf 分开申请内存分配
 		c = new(hchan)
 		c.buf = mallocgc(mem, elem, true)
 	}
 
-	c.elemsize = uint16(elem.size)
-	c.elemtype = elem
-	c.dataqsiz = uint(size)
+	c.elemsize = uint16(elem.size) // channel 元素的大小，是 elem 元数据类型的大小
+	c.elemtype = elem              // 元素的类型，表示 channel 内的每个元素是什么
+	c.dataqsiz = uint(size)        // buf 数组的大小，比如 make(chan int, 5)，那么这里就是 dataqsiz=5
 
 	if debugChan {
 		print("makechan: chan=", c, "; elemsize=", elem.size, "; elemalg=", elem.alg, "; dataqsiz=", size, "\n")
@@ -140,10 +149,12 @@ func chansend1(c *hchan, elem unsafe.Pointer) {
  * the operation; we'll see that it's now closed.
  */
 func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
+	// 若 hchan 未初始化，并且 block 为 true，则永久阻塞
 	if c == nil {
 		if !block {
 			return false
 		}
+		// gopark 会让当前 goroutine 休眠
 		gopark(nil, nil, waitReasonChanSendNilChan, traceEvGoStop, 2)
 		throw("unreachable")
 	}
@@ -152,7 +163,7 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 		print("chansend: chan=", c, "\n")
 	}
 
-	if raceenabled {
+	if raceenabled { // 竞争检查
 		racereadpc(c.raceaddr(), callerpc, funcPC(chansend))
 	}
 
@@ -170,23 +181,27 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	// It is okay if the reads are reordered here: if we observe that the channel is not
 	// ready for sending and then observe that it is not closed, that implies that the
 	// channel wasn't closed during the first observation.
+	// 非阻塞且 chan 未关闭场景
+	// 如果没有缓冲区且没有等待队列 || 缓冲区满了，直接返回
 	if !block && c.closed == 0 && ((c.dataqsiz == 0 && c.recvq.first == nil) ||
 		(c.dataqsiz > 0 && c.qcount == c.dataqsiz)) {
 		return false
 	}
 
 	var t0 int64
-	if blockprofilerate > 0 {
+	if blockprofilerate > 0 { // 	阻塞时的打点纳秒数
 		t0 = cputicks()
 	}
 
 	lock(&c.lock)
 
+	// 若 chan 关闭了，panic
 	if c.closed != 0 {
 		unlock(&c.lock)
 		panic(plainError("send on closed channel"))
 	}
 
+	// 读队列不为空，从读队列队首取一个等待的 g，直接将数据发给它
 	if sg := c.recvq.dequeue(); sg != nil {
 		// Found a waiting receiver. We pass the value we want to send
 		// directly to the receiver, bypassing the channel buffer (if any).
@@ -194,6 +209,7 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 		return true
 	}
 
+	// 读队列为空，并且 chan buf 未满，数据放入 buf 中，写索引 (sendx) +1，buf 内元素数量 (qcount) +1
 	if c.qcount < c.dataqsiz {
 		// Space is available in the channel buffer. Enqueue the element to send.
 		qp := chanbuf(c, c.sendx)
@@ -201,9 +217,9 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 			raceacquire(qp)
 			racerelease(qp)
 		}
-		typedmemmove(c.elemtype, qp, ep)
+		typedmemmove(c.elemtype, qp, ep) // 拷贝元素到 buf 中
 		c.sendx++
-		if c.sendx == c.dataqsiz {
+		if c.sendx == c.dataqsiz { // 如果写索引已经到了最后一位，则重新回到 0
 			c.sendx = 0
 		}
 		c.qcount++
@@ -211,12 +227,14 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 		return true
 	}
 
+	// 读队列为空，并且 chan buf 已满，如果是非阻塞调用，直接返回 false
 	if !block {
 		unlock(&c.lock)
 		return false
 	}
 
 	// Block on the channel. Some receiver will complete our operation for us.
+	// 为当前 goroutine 分配 sudog，然后将其入队到 sendq 队列
 	gp := getg()
 	mysg := acquireSudog()
 	mysg.releasetime = 0
@@ -232,21 +250,24 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	mysg.c = c
 	gp.waiting = mysg
 	gp.param = nil
-	c.sendq.enqueue(mysg)
+	c.sendq.enqueue(mysg) // 入队 sendq 队列，写入最后一个
+	// 当前 goroutine 休眠
 	goparkunlock(&c.lock, waitReasonChanSend, traceEvGoBlockSend, 3)
 	// Ensure the value being sent is kept alive until the
 	// receiver copies it out. The sudog has a pointer to the
 	// stack object, but sudogs aren't considered as roots of the
 	// stack tracer.
+	// 在到达这里之前，保持当前元素活跃，以免被 GC 回收
 	KeepAlive(ep)
 
 	// someone woke us up.
+	// 唤醒当前 goroutine
 	if mysg != gp.waiting {
 		throw("G waiting list is corrupted")
 	}
 	gp.waiting = nil
 	if gp.param == nil {
-		if c.closed == 0 {
+		if c.closed == 0 { // closechan() 之后的 panic
 			throw("chansend: spurious wakeup")
 		}
 		panic(plainError("send on closed channel"))
@@ -286,16 +307,18 @@ func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 			c.sendx = c.recvx // c.sendx = (c.sendx+1) % c.dataqsiz
 		}
 	}
+	// 如果元素正常，就将 g 要写的数据拷贝到 v := <-ch 中的 v 所在的内存地址上
 	if sg.elem != nil {
 		sendDirect(c.elemtype, sg, ep)
 		sg.elem = nil
 	}
-	gp := sg.g
-	unlockf()
+	gp := sg.g // 获取 goroutine
+	unlockf()  // 解锁
 	gp.param = unsafe.Pointer(sg)
 	if sg.releasetime != 0 {
 		sg.releasetime = cputicks()
 	}
+	// 将 goroutine 置为可调度状态
 	goready(gp, skip+1)
 }
 
