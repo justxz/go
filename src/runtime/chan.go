@@ -319,7 +319,7 @@ func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 		sg.releasetime = cputicks() // cpu 的纳秒数
 	}
 	// 将 goroutine 置为可调度状态
-	goready(gp, skip+1)
+	goready(gp, skip+1) // _Gwaiting -> _Grunnable
 }
 
 // Sends and receives on unbuffered or empty-buffered channels are the
@@ -636,7 +636,7 @@ func recv(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 	if sg.releasetime != 0 {
 		sg.releasetime = cputicks()
 	}
-	goready(gp, skip+1)
+	goready(gp, skip+1) // _Gwaiting -> _Grunnable
 }
 
 // compiler implements
