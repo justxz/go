@@ -323,11 +323,15 @@ func acquireSudog() *sudog {
 	// Break the cycle by doing acquirem/releasem around new(sudog).
 	// The acquirem/releasem increments m.locks during new(sudog),
 	// which keeps the garbage collector from being invoked.
+	// 获取当前 g 所在的线程 m，并加锁
 	mp := acquirem()
+	// 获取线程 m 所在的调度器 p
 	pp := mp.p.ptr()
+	// 如果本地 p 调度队列中没有 sudog 了，就去全局调度队列中找，如果全局也没有就 new 一个
 	if len(pp.sudogcache) == 0 {
 		lock(&sched.sudoglock)
 		// First, try to grab a batch from central cache.
+		// 取本地 p 调度队列容量的一半
 		for len(pp.sudogcache) < cap(pp.sudogcache)/2 && sched.sudogcache != nil {
 			s := sched.sudogcache
 			sched.sudogcache = s.next
@@ -336,6 +340,7 @@ func acquireSudog() *sudog {
 		}
 		unlock(&sched.sudoglock)
 		// If the central cache is empty, allocate a new one.
+		// 如果全局调度队列为空，就 new 一个
 		if len(pp.sudogcache) == 0 {
 			pp.sudogcache = append(pp.sudogcache, new(sudog))
 		}
@@ -347,12 +352,14 @@ func acquireSudog() *sudog {
 	if s.elem != nil {
 		throw("acquireSudog: found s.elem != nil in cache")
 	}
+	// 解锁
 	releasem(mp)
 	return s
 }
 
 //go:nosplit
 func releaseSudog(s *sudog) {
+	// 检测 sudog 是否合法
 	if s.elem != nil {
 		throw("runtime: sudog with non-nil elem")
 	}
@@ -375,8 +382,11 @@ func releaseSudog(s *sudog) {
 	if gp.param != nil {
 		throw("runtime: releaseSudog with non-nil gp.param")
 	}
+	// 获取当前 goroutine 所在的线程 m，并加锁
 	mp := acquirem() // avoid rescheduling to another P
+	// 获取线程 m 所在的调度器 p
 	pp := mp.p.ptr()
+	// 如果本地 p 调度队列缓存满了，就将本地调度队列容量的一半放到全局调度队列中
 	if len(pp.sudogcache) == cap(pp.sudogcache) {
 		// Transfer half of local cache to the central cache.
 		var first, last *sudog
@@ -397,7 +407,9 @@ func releaseSudog(s *sudog) {
 		sched.sudogcache = first
 		unlock(&sched.sudoglock)
 	}
+	// 把当前的操作的 sudog 放到本地调度队列中
 	pp.sudogcache = append(pp.sudogcache, s)
+	// 解锁
 	releasem(mp)
 }
 
