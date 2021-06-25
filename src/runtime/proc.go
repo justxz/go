@@ -382,7 +382,7 @@ func releaseSudog(s *sudog) {
 	if gp.param != nil {
 		throw("runtime: releaseSudog with non-nil gp.param")
 	}
-	// 获取当前 goroutine 所在的线程 m，并加锁
+	// 获取当前 g 所在的线程 m，并加锁
 	mp := acquirem() // avoid rescheduling to another P
 	// 获取线程 m 所在的调度器 p
 	pp := mp.p.ptr()

@@ -149,12 +149,13 @@ func chansend1(c *hchan, elem unsafe.Pointer) {
  * the operation; we'll see that it's now closed.
  */
 func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
-	// 若 hchan 未初始化，并且为阻塞调用，则永久阻塞
+	// 若 hchan 未初始化
+	// 如果为非阻塞调用，直接返回
+	// 如果为阻塞调用，则永久阻塞
 	if c == nil {
 		if !block {
 			return false
 		}
-		// gopark 会让当前 goroutine 休眠
 		gopark(nil, nil, waitReasonChanSendNilChan, traceEvGoStop, 2) // _Grunning -> _Gwaiting
 		throw("unreachable")
 	}
@@ -312,13 +313,13 @@ func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 		sendDirect(c.elemtype, sg, ep)
 		sg.elem = nil
 	}
-	gp := sg.g // 获取 goroutine
+	gp := sg.g // 获取 g
 	unlockf()  // 解锁
 	gp.param = unsafe.Pointer(sg)
 	if sg.releasetime != 0 {
 		sg.releasetime = cputicks() // cpu 的纳秒数
 	}
-	// 将 goroutine 置为可调度状态
+	// 将 g 置为可调度状态
 	goready(gp, skip+1) // _Gwaiting -> _Grunnable
 }
 
@@ -379,7 +380,7 @@ func closechan(c *hchan) {
 	var glist gList
 
 	// release all readers
-	// 唤醒所有的读等待队列，将 sudog 的数据置为其对应类型的零值，将 goroutine 携带的参数置为 nil，然后将 goroutine 放入到 glist 中
+	// 取出所有的读等待队列，将 sudog 的数据置为其对应类型的零值，将 g 携带的参数置为 nil，然后将 g 放入到 glist 中
 	for {
 		sg := c.recvq.dequeue()
 		if sg == nil {
@@ -401,7 +402,7 @@ func closechan(c *hchan) {
 	}
 
 	// release all writers (they will panic)
-	// 唤醒所有的写等待队列，将 sudog 的数据置为其对应类型的零值，将 g 携带的参数置为 nil，然后将 g 放入到 glist 中
+	// 取出所有的写等待队列，将 sudog 的数据置为其对应类型的零值，将 g 携带的参数置为 nil，然后将 g 放入到 glist 中
 	// 这些 g 最终都会 panic
 	for {
 		sg := c.sendq.dequeue()
@@ -422,10 +423,11 @@ func closechan(c *hchan) {
 	unlock(&c.lock)
 
 	// Ready all Gs now that we've dropped the channel lock.
-	// 将 glist 中所有的 g 置为可调度状态
+	// 唤醒所有的 g
 	for !glist.empty() {
 		gp := glist.pop()
 		gp.schedlink = 0
+		// 将 g 置为可调度状态
 		goready(gp, 3) // _Gwaiting -> _Grunnable
 	}
 }
@@ -457,12 +459,12 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 	}
 
 	// 若 hchan 未初始化，此时进行读取是有问题的
+	// 非阻塞调用，直接返回
+	// 阻塞调用，当前 g 永久休眠
 	if c == nil {
-		// 非阻塞调用，直接退出
 		if !block {
 			return
 		}
-		// 阻塞调用时，当前 g 永久休眠
 		gopark(nil, nil, waitReasonChanReceiveNilChan, traceEvGoStop, 2) // _Grunning -> _Gwaiting
 		throw("unreachable")
 	}
