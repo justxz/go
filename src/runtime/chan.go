@@ -274,7 +274,7 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	// to park on a channel. The window between when this G's status
 	// changes and when we set gp.activeStackChans is not safe for
 	// stack shrinking.
-	// 当前 goroutine 休眠
+	// 当前 g 休眠
 	atomic.Store8(&gp.parkingOnChan, 1)
 	gopark(chanparkcommit, unsafe.Pointer(&c.lock), waitReasonChanSend, traceEvGoBlockSend, 2)
 	// Ensure the value being sent is kept alive until the
@@ -337,13 +337,13 @@ func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 		sendDirect(c.elemtype, sg, ep)
 		sg.elem = nil
 	}
-	gp := sg.g // 获取 goroutine
+	gp := sg.g // 获取 g
 	unlockf()  // 解锁
 	gp.param = unsafe.Pointer(sg)
 	if sg.releasetime != 0 {
 		sg.releasetime = cputicks() // cpu 的纳秒数
 	}
-	// 将 goroutine 置为可调度状态
+	// 将 g 置为可调度状态
 	goready(gp, skip+1) // _Gwaiting -> _Grunnable
 }
 
@@ -404,7 +404,7 @@ func closechan(c *hchan) {
 	var glist gList
 
 	// release all readers
-	// 取出所有的读等待队列，将 sudog 的数据置为其对应类型的零值，将 g 携带的参数置为 nil，然后将 goroutine 放入到 glist 中
+	// 取出所有的读等待队列，将 sudog 的数据置为其对应类型的零值，将 g 携带的参数置为 nil，然后将 g 放入到 glist 中
 	for {
 		sg := c.recvq.dequeue()
 		if sg == nil {
