@@ -29,8 +29,8 @@ const (
 type scase struct {
 	c           *hchan         // chan
 	elem        unsafe.Pointer // data element
-	kind        uint16
-	pc          uintptr // race pc (for race detector / msan)
+	kind        uint16         // case 语句的类型，default、->chan、<-chan
+	pc          uintptr        // race pc (for race detector / msan)
 	releasetime int64
 }
 
@@ -44,6 +44,7 @@ func selectsetpc(cas *scase) {
 }
 
 func sellock(scases []scase, lockorder []uint16) {
+	// c 记录了上次加锁的 hchan 地址，如果和当前 *hchan 相同，那么就不会再次加锁
 	var c *hchan
 	for _, o := range lockorder {
 		c0 := scases[o].c
@@ -137,15 +138,20 @@ func selectgo(cas0 *scase, order0 *uint16, ncases int) (int, bool) {
 
 	// NOTE: In order to maintain a lean stack size, the number of scases
 	// is capped at 65536.
+	// 将 case0，order0 这些指针转换成相应的 slice 结构
 	cas1 := (*[1 << 16]scase)(unsafe.Pointer(cas0))
 	order1 := (*[1 << 17]uint16)(unsafe.Pointer(order0))
 
+	// order1 会被分为 pollorder 和 lockorder
+	// pollorder 决定 select 的随机选择
+	// lockorder 决定 select 的加锁
 	scases := cas1[:ncases:ncases]
 	pollorder := order1[:ncases:ncases]
 	lockorder := order1[ncases:][:ncases:ncases]
 
 	// Replace send/receive cases involving nil channels with
 	// caseNil so logic below can assume non-nil channel.
+	// 对于 chan 为 nil 的收发操作，case 被修改为初始值
 	for i := range scases {
 		cas := &scases[i]
 		if cas.c == nil && cas.kind != caseDefault {
@@ -170,6 +176,7 @@ func selectgo(cas0 *scase, order0 *uint16, ncases int) (int, bool) {
 	// optimizing (and needing to test).
 
 	// generate permuted order
+	// 生成随机顺序
 	for i := 1; i < ncases; i++ {
 		j := fastrandn(uint32(i + 1))
 		pollorder[i] = pollorder[j]
@@ -178,6 +185,7 @@ func selectgo(cas0 *scase, order0 *uint16, ncases int) (int, bool) {
 
 	// sort the cases by Hchan address to get the locking order.
 	// simple heap sort, to guarantee n log n time and constant stack footprint.
+	// 对 lockorder 进行堆排序，由 case.c(*hchan) 的地址来决定排序顺序
 	for i := 0; i < ncases; i++ {
 		j := i
 		// Start with the pollorder to permute cases on the same channel.
@@ -222,6 +230,7 @@ func selectgo(cas0 *scase, order0 *uint16, ncases int) (int, bool) {
 	}
 
 	// lock all the channels involved in the select
+	// 在查看所有的 case 前，先对所有 chan 加锁
 	sellock(scases, lockorder)
 
 	var (
@@ -242,6 +251,7 @@ loop:
 	var casi int
 	var cas *scase
 	var recvOK bool
+	// 根据 pollorder 的顺序，遍历所有 case 是否有可以立即进行读写操作的 chan
 	for i := 0; i < ncases; i++ {
 		casi = int(pollorder[i])
 		cas = &scases[casi]
@@ -284,6 +294,7 @@ loop:
 		}
 	}
 
+	// chan 不可操作，有 default 操作，执行 default 操作
 	if dfl != nil {
 		selunlock(scases, lockorder)
 		casi = dfli
@@ -292,6 +303,7 @@ loop:
 	}
 
 	// pass 2 - enqueue on all chans
+	// chan 不可操作，无 default 操作，阻塞
 	gp = getg()
 	if gp.waiting != nil {
 		throw("gp.waiting != nil")

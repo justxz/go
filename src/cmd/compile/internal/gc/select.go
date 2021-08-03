@@ -110,6 +110,7 @@ func walkselectcases(cases *Nodes) []*Node {
 	sellineno := lineno
 
 	// optimization: zero-case select
+	// 无 case，永久阻塞
 	if n == 0 {
 		return []*Node{mkcall("block", nil, nil)}
 	}
@@ -117,6 +118,8 @@ func walkselectcases(cases *Nodes) []*Node {
 	// optimization: one-case select: single op.
 	// TODO(rsc): Reenable optimization once order.go can handle it.
 	// golang.org/issue/7672.
+	// 单个 case
+	// 把单个 case 操作改写成了 if 语句
 	if n == 1 {
 		cas := cases.First()
 		setlineno(cas)
@@ -178,6 +181,7 @@ func walkselectcases(cases *Nodes) []*Node {
 
 	// convert case value arguments to addresses.
 	// this rewrite is used by both the general code and the next optimization.
+	// 把 case 值转换为地址
 	for _, cas := range cases.Slice() {
 		setlineno(cas)
 		n := cas.Left
@@ -202,6 +206,7 @@ func walkselectcases(cases *Nodes) []*Node {
 	}
 
 	// optimization: two-case select but one is default: single non-blocking op.
+	// 两个 case 且有一个是 default
 	if n == 2 && (cases.First().Left == nil || cases.Second().Left == nil) {
 		var cas *Node
 		var dflt *Node
@@ -260,7 +265,10 @@ func walkselectcases(cases *Nodes) []*Node {
 	var init []*Node
 
 	// generate sel-struct
+	// 通常情况，多 case 情况
 	lineno = sellineno
+	// 初始化 scase 结构数组
+	// selv 和 order 会作为 selectgo 的参数
 	selv := temp(types.NewArray(scasetype(), int64(n)))
 	r := nod(OAS, selv, nil)
 	r = typecheck(r, ctxStmt)
@@ -272,6 +280,7 @@ func walkselectcases(cases *Nodes) []*Node {
 	init = append(init, r)
 
 	// register cases
+	// 第一步，遍历所有 case，将所有的 case 转化成 scase 结构体放到 selv 中
 	for i, cas := range cases.Slice() {
 		setlineno(cas)
 
@@ -331,6 +340,8 @@ func walkselectcases(cases *Nodes) []*Node {
 	}
 
 	// run the select
+	// 第二步，运行 selectgo
+	// selectgo 会返回的两个值，chosen 表示被选中的 case 的索引，recvOK 表示对于接收操作，是否成功接收
 	lineno = sellineno
 	chosen := temp(types.Types[TINT])
 	recvOK := temp(types.Types[TBOOL])
@@ -346,6 +357,7 @@ func walkselectcases(cases *Nodes) []*Node {
 	init = append(init, nod(OVARKILL, order, nil))
 
 	// dispatch cases
+	// 第三步，遍历 cases，判断自己是不是被选中的 case，执行后续逻辑
 	for i, cas := range cases.Slice() {
 		setlineno(cas)
 
