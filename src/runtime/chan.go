@@ -558,7 +558,7 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 		return true, false
 	}
 
-	// 写等待队列不为空，直接从队首 g 中读取数据
+	// 写等待队列不为空，两种处理方式
 	if sg := c.sendq.dequeue(); sg != nil {
 		// Found a waiting sender. If buffer is size 0, receive value
 		// directly from sender. Otherwise, receive from head of queue
@@ -654,7 +654,7 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 // sg must already be dequeued from c.
 // A non-nil ep must point to the heap or the caller's stack.
 func recv(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
-	// 若 chan buf 中数据为空
+	// 若 chan buf 中数据为空，直接取写入方数据
 	if c.dataqsiz == 0 {
 		if raceenabled {
 			racesync(c, sg)
@@ -668,7 +668,7 @@ func recv(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 		// head of the queue. Make the sender enqueue
 		// its item at the tail of the queue. Since the
 		// queue is full, those are both the same slot.
-		// chan buf 不为空，取 buf 索引处数据
+		// chan buf 不为空，取 buf 索引处数据，写入方数据放到 buf 中
 		qp := chanbuf(c, c.recvx)
 		if raceenabled {
 			raceacquire(qp)
